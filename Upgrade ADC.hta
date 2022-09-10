@@ -1,0 +1,100 @@
+<html><head><title>Upgrade ADC</title><HTA:APPLICATION ID="HTA" APPLICATIONNAME="Upgrade ADC" SCROLL="no" SINGLEINSTANCE="no" BORDER="thin" BORDERSTYLE="normal" CAPTION="yes" ICON="citrix.ico" MAXIMIZEBUTTON="no" MINIMIZEBUTTON="yes" SHOWINTASKBAR="yes" SYSMENU="yes" VERSION="0.1" WINDOWSTATE="normal"></head>
+<script language="VBScript">
+
+View = 1	'0 to hide putty screens, 1 to show putty screens
+
+window.resizeto 300,320
+Dim WSH : Set WSH = CreateObject("WScript.Shell")
+Dim FSO : Set FSO = CreateObject("Scripting.FileSystemObject")
+strCurrentDir = WSH.CurrentDirectory
+
+Function SelectFirmware
+	Firmware.value = Dlg.openfiledlg( , , , CStr("Select the Firmware File"))
+End Function
+
+Function TCP(IP,TCPPort)
+	If WSH.Run("powershell If ((New-Object System.Net.Sockets.TCPClient -ArgumentList " & IP & "," & TCPPort & ").connected){exit 2}",0,true) = 2 Then TCP = True
+End Function
+
+Function Upgrade
+	If Password.value = "" Then msgbox "The password can't be blank.":Exit Function
+	If NSIP.value = "" Then msgbox "The IP address can't be blank.":Exit Function
+	If Firmware.value = "" Then msgbox "No firmware file selected.":Exit Function
+
+	MSG.InnerHTML = "Verifying SSH access to " & NSIP.value
+	If NOT TCP(NSIP.value,22) Then msgbox "The IP address does not seem to be online." & vbcrlf & "Please check that the IP address is correct.":Exit Function
+	MSG.InnerHTML = "SSH access to " & NSIP.value & " verified"
+
+	MSG.InnerHTML = "Downloading putty and pscp"
+	If NOT FSO.FileExists(strCurrentDir & "\putty.exe") Then WSH.Run "powershell Start-BitsTransfer 'https://the.earth.li/~sgtatham/putty/latest/w32/putty.exe' '" & strCurrentDir & "\putty.exe'",0,true
+	If NOT FSO.FileExists(strCurrentDir & "\putty.exe") Then msgbox "We were not able to download the putty.exe file that is needed for this script to work. Please download putty.exe and put it in the same directory as this script and run again.":window.close
+	If NOT FSO.FileExists(strCurrentDir & "\pscp.exe") Then WSH.Run "powershell Start-BitsTransfer 'https://the.earth.li/~sgtatham/putty/latest/w32/pscp.exe' '" & strCurrentDir & "\pscp.exe'",0,true
+	If NOT FSO.FileExists(strCurrentDir & "\pscp.exe") Then msgbox "We were not able to download the pscp.exe file that is needed for this script to work. Please download pscp.exe and put it in the same directory as this script and run again.":window.close
+
+	FWname = FSO.GetFileName(Firmware.value)
+	FWbase = FSO.GetBaseName(Firmware.value)
+
+	MSG.InnerHTML = "Preparing the upgrade of " & NSIP.Value
+	p = """" & strCurrentDir & "\upgradecommands.txt"""
+	l = """" & strCurrentDir & "\upgrade.log"""
+	echo = "cmd /c echo "
+
+	WSH.Run echo & "shell > " & p,0,true
+	If clean.checked Then
+		WSH.Run echo & "df -h >> " & p,0,true
+		WSH.Run echo & "rm -r -f /var/core/* >> " & p,0,true
+		WSH.Run echo & "rm -r -f /var/crash/* >> " & p,0,true
+		WSH.Run echo & "rm -r -f /var/nsinstall/* >> " & p,0,true
+		WSH.Run echo & "rm -r -f /var/nstrace/* >> " & p,0,true
+		WSH.Run echo & "rm -r -f /var/tmp/* >> " & p,0,true
+		WSH.Run echo & "find /var/log/ -mtime +7 -delete >> " & p,0,true
+		WSH.Run echo & "find /var/nslog/ -mtime +7 -delete >> " & p,0,true
+		WSH.Run echo & "find /var/nsproflog/ -mtime +7 -delete >> " & p,0,true
+		WSH.Run echo & "find /var/nsproflog/ -mtime +7 -delete >> " & p,0,true
+		WSH.Run echo & "find /var/nssynclog/ -mtime +7 -delete >> " & p,0,true
+		WSH.Run echo & "find /var/nssynclog/ -mtime +7 -delete >> " & p,0,true
+		WSH.Run echo & "find /var/nstmp/ -mtime +7 -delete >> " & p,0,true
+		WSH.Run echo & "find /var/mps/log/ -mtime +7 -delete >> " & p,0,true
+		WSH.Run echo & "df -h >> " & p,0,true
+	End If
+	WSH.Run echo & "cd /var/nsinstall >> " & p,0,true
+	WSH.Run echo & "mkdir " & FWbase & " >> " & p,0,true
+	WSH.Run echo & "exit >> " & p,0,true
+	WSH.Run """" & strCurrentDir & "\putty.exe"" -ssh " & NSIP.Value & " -l " & User.Value & " -pw " & Password.Value & " -m " & p & " -logoverwrite -sessionlog " & l,View,true
+
+	Found = 0:Set LogF = FSO.OpenTextFile(strCurrentDir & "\upgrade.log",1):Do Until LogF.AtEndOfStream:Found = Found + InStr(1,LogF.ReadLine, "Warning: You are connected to a secondary node",1):Loop:LogF.Close
+	If Found = 0 Then If WSH.Popup(NSIP.value & " does not seem to be a passive node in the HA configuration or there might not be a HA configuration at all." & vbcrlf & vbcrlf & "The upgrade will reboot the ADC and this might interfere your users." & vbcrlf & vbcrlf & "Are you sure you want to continue?",0,"Confirm reboot?",4+16) <> 6 Then Exit Function
+
+	WSH.Run echo & "shell > " & p,0,true
+	WSH.Run echo & "cd /var/nsinstall/" & FWbase & " >> " & p,0,true
+	WSH.Run echo & "tar -zxvf " & FWname & " >> " & p,0,true
+	WSH.Run echo & "./installns -yYGDN >> " & p,0,true
+	WSH.Run echo & "exit >> " & p,0,true
+
+	MSG.InnerHTML = "Uploading " & FWname
+	WSH.Run """" & strCurrentDir & "\pscp.exe"" -scp -P 22 -l " & User.Value & " -pw " & Password.Value & " " & Firmware.value & " " & NSIP.Value & ":/var/nsinstall/" & FWbase,1,true
+	MSG.InnerHTML = "Upload done, installing the upgrade"
+
+	WSH.Run """" & strCurrentDir & "\putty.exe"" -ssh " & NSIP.Value & " -l " & User.Value & " -pw " & Password.Value & " -m " & p & " -logappend -sessionlog " & l,View,false
+	Do While TCP(NSIP.value,22):MSG.InnerHTML = "Upgrading, waiting for reboot":WSH.Run "cmd /c ping 127.0.0.1",0,true:Loop
+	Do Until TCP(NSIP.value,22):MSG.InnerHTML = "Rebooting":WSH.Run "cmd /c taskkill /f /im putty.exe",0,true:Loop
+
+	MSG.InnerHTML = "Upgrade Finished. You can review upgrade.log for more details"
+	WSH.Run "cmd /c del " & p,0,true
+End Function
+
+</script>
+<style type="text/css">
+Body {font-family:Tahoma;font-weight:Bold;font-size:10pt;}
+Table {font-family:Tahoma;font-weight:Bold;font-size:10pt;}	
+</style>
+<body><center><h2>Upgrade ADC</h2>
+<input type="text" name="Firmware" size="10" style="display:none">
+<input type="button" onClick="SelectFirmware" value="Select Firmware">
+<OBJECT id=Dlg classid="CLSID:3050F4E1-98B5-11CF-BB82-00AA00BDCE0B" width=0 height=0></OBJECT><br>
+Clean before upgrade?<input type="checkbox" name="clean" ID="clean" CHECKED>
+<table>
+<tr><td>Username:</td><td><input type="text" ID="user" Value="nsroot"></td></tr>
+<tr><td>Password:</td><td><input type="password" ID="Password" Value=""></td></tr>
+<tr><td>ADC IP or DNS:</td><td><input type="text" ID="NSIP" Value=""></td></tr>
+</table><input type="button" Value="Upgrade" OnClick="Upgrade"><br><br><span ID="MSG"></span></center></body></html>
